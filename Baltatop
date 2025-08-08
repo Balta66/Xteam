@@ -1,0 +1,172 @@
+# Balta Top Up — Projet complet (Front + Backend + Déploiement GitHub Pages)
+
+> Ce document contient tout ce dont tu as besoin pour un site **Balta Top Up** plus complet, inspiré du style de Cozy Top Up :
+> - Frontend React complet (multi-sections : page d'accueil, catalogue, page produit, espace commandes/admin, FAQ)
+> - Backend Node/Express minimal pour recevoir et stocker les commandes
+> - Option : utiliser GitHub Pages pour héberger le **frontend** (site statique)
+> - Option : utiliser **GitHub Actions** + `repository_dispatch` pour enregistrer commandes comme *GitHub Issues* (pas de serveur externe nécessaire) — instructions et workflow inclus
+> - Guide pas-à-pas pour créer le dépôt et déployer
+
+---
+
+## Structure du projet suggérée
+
+```
+balta-top-up/
+├─ frontend/               # React app (prête pour GitHub Pages)
+│  ├─ public/
+│  └─ src/
+│     ├─ components/
+│     ├─ App.jsx
+│     └─ index.jsx
+├─ backend/                # (optionnel) Express server (pour hébergement sur Render/Heroku)
+│  └─ server.js
+├─ .github/workflows/      # Workflow GitHub Actions pour transformer submissions en Issues
+│  └─ submit-to-issue.yml
+├─ README.md
+```
+
+---
+
+## 1) Frontend (React) — points clés
+
+- Site responsive, sections : header, hero, catalogue (forfaits), comment payer, formulaire de commande, tableau de bord admin (affiche commandes reçues), footer.
+- Formulaire envoie la commande à 1 des 2 options :
+  1. **Vers une API backend** (`/api/order`) — si tu as un serveur (Render, Railway, Heroku).
+  2. **Vers GitHub Actions** : le frontend envoie un `POST` vers l'endpoint GitHub Pages spécial (un petit fetch vers l'Action) qui déclenche un workflow `repository_dispatch` (nécessite token côté Action). Le workflow crée une Issue contenant la commande (pratique : tu reçois les commandes directement dans l'onglet Issues du repo).
+- Les captures d'écran de paiement sont encodées en Base64 (ou attachées si backend autorise multipart/form-data). Pour la méthode Issue on inclut un petit lien/data URI (attention à la taille — recommander une taille max 2–3MB).
+
+> Dans le fichier `frontend/src/App.jsx` tu trouveras le code principal (composants : `Header`, `Packages`, `OrderForm`, `AdminPanel`).
+
+---
+
+## 2) Backend minimal (optionnel)
+
+Si tu veux centraliser les commandes et stocker les preuves localement ou dans une base de données :
+
+**backend/server.js** (exemple express)
+
+```js
+// server.js — minimal
+const express = require('express');
+const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+const upload = multer({ dest: 'uploads/' });
+app.use(express.json());
+
+app.post('/api/order', upload.single('paymentScreenshot'), (req, res) => {
+  const { ffId, nickname, amount, clientNumber } = req.body;
+  const file = req.file; // preuve
+  const order = {
+    ffId, nickname, amount, clientNumber, file: file ? file.filename : null,
+    receivedAt: new Date().toISOString()
+  };
+  // sauvegarde locale (ex: JSON)
+  const ordersFile = path.join(__dirname, 'orders.json');
+  const list = fs.existsSync(ordersFile) ? JSON.parse(fs.readFileSync(ordersFile)) : [];
+  list.push(order);
+  fs.writeFileSync(ordersFile, JSON.stringify(list, null, 2));
+  res.json({ ok: true, message: 'Commande reçue' });
+});
+
+app.listen(PORT, () => console.log('Server listening on', PORT));
+```
+
+Tu peux déployer ce backend sur Render / Railway / Vercel serverless (ou tout autre provider). Lorsque le backend est déployé, change l'URL `/api/order` dans le frontend vers l'URL fournie.
+
+---
+
+## 3) Réception des commandes via GitHub Issues (pas de backend externe nécessaire)
+
+### Avantages
+- Hébergement frontend 100% gratuit sur **GitHub Pages**.
+- Les commandes arrivent directement dans l'onglet **Issues** du repo (facile à gérer, pas d'infra).
+
+### Limites
+- Les captures d'écran volumineuses posent problème (Issues accepte des images mais tu auras besoin d'uploader en base64 ou via le champ `body` en Markdown). Nous recommandons d'indiquer aux clients de réduire la taille des captures.
+
+### Workflow GitHub Actions (exemple)
+
+**.github/workflows/submit-to-issue.yml**
+
+```yaml
+name: Create issue from repository_dispatch
+on:
+  repository_dispatch:
+    types: [new-order]
+
+jobs:
+  create-issue:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Create GitHub Issue
+        uses: peter-evans/create-issue@v4
+        with:
+          title: "Nouvelle commande — ${{ github.event.client }}"
+          body: |
+            **ID FF**: ${{ github.event.client_payload.ffId }}
+            
+            **Pseudo**: ${{ github.event.client_payload.nickname }}
+            
+            **Montant**: ${{ github.event.client_payload.amount }}
+            
+            **Numéro client**: ${{ github.event.client_payload.clientNumber }}
+            
+            **Capture (data)**:
+            ${{ github.event.client_payload.screenshot || 'Aucune capture'} }
+```
+
+### Comment déclencher l'Action depuis le frontend
+
+- Dans le frontend, au moment de `fetch`, envoie un `POST` vers l'API GitHub REST `POST /repos/{owner}/{repo}/dispatches` **NE PAS** appeler cette API directement depuis le navigateur (nécessite token exposé). À la place :
+  - Tu peux créer une petite fonction serverless (par exemple GitHub Actions `workflow_dispatch` via un proxy) ou
+  - Utiliser un petit backend (hébergé) qui prends la requête de l'utilisateur et appelle l'API GitHub avec un token stocké en secret.
+
+**Méthode alternative (simple pour démarrer)** :
+- Le frontend envoie un email à une adresse (via Formspree/EmailJS) — mais cela utilise un service tiers.
+
+> Si tu veux exactement la méthode Issues sans serveur, je te fournis le workflow complet + un petit Cloud Function (ou GitHub Action) qui accepte la soumission et fait `repository_dispatch`. Cela demande juste d'ajouter un **secret** dans les paramètres du repo (par ex. `GH_API_TOKEN`).
+
+---
+
+## 4) Déploiement frontend sur GitHub Pages (pas à pas)
+
+1. Crée un nouveau repo `balta-top-up` sur GitHub.
+2. Dans `frontend`, initialise une React app (`create-react-app`) ou Vite.
+3. Dans `package.json`, ajoute la `homepage` si utilises `create-react-app`: `"homepage": "https://<ton-username>.github.io/<repo>"`.
+4. Build : `npm run build`.
+5. Pousse la branche `gh-pages` (ou active GitHub Pages sur `gh-pages` branch) — ou utilise l'option `gh-pages` package pour automatiser le déploiement.
+
+> Je peux te fournir un script `deploy-gh-pages` prêt à l'emploi.
+
+---
+
+## 5) Admin / espace commandes
+
+- Si tu utilises le backend Express : l'admin peut être une route protégée (`/admin`) qui lit `orders.json` et affiche la liste.
+- Si tu utilises la méthode Issues : l'admin est l'onglet **Issues** du repo GitHub — simple et sécurisé (seulement toi et ton équipe peuvent y accéder si le repo est privé).
+
+---
+
+## 6) Sécurité & Bonnes pratiques
+
+- **Ne publie jamais** de token GitHub côté client.
+- Stocke les tokens (PAT) ou clés API dans les **Secrets** du repo GitHub ou du provider.
+- Limite la taille des images acceptées (ex: `max 3MB`) et redimensionne côté client avant upload si possible.
+
+---
+
+## 7) Ce que je peux faire maintenant (dis-moi ce que tu veux en premier)
+
+1. Générer **tout le code frontend** (fichiers `App.jsx`, composants, CSS Tailwind) prêt pour GitHub Pages.
+2. Générer **le backend Express** complet (`server.js`) + instructions pour héberger (Render/Railway) et connecter au frontend.
+3. Générer **le workflow GitHub Actions** complet (`submit-to-issue.yml`) + un petit proxy Cloud Function (Node) qui reçoit le POST du frontend et déclenche `repository_dispatch` (si tu veux éviter un serveur payant).
+4. Fournir un **README** pas-à-pas pour créer le repo, configurer les secrets et déployer (avec commandes exactes).
+
+Choisis 1 ou plusieurs options (par ex. `1 + 3 + 4`) et je vais ajouter les fichiers correspondants ici dans le projet pour que tu puisses copier-coller et pousser sur GitHub. 🎯
